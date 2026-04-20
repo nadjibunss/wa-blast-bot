@@ -1,3 +1,4 @@
+// handler.js
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -19,40 +20,31 @@ function saveDB(data) {
   fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2), 'utf-8');
 }
 
-// ── Build pesan dengan URL button ─────────────────────────────────
+// ── Build pesan dengan templateButtons (URL button) ───────────────
 function buildButtonMessage(db) {
-  const buttons = db.buttons.map((btn, i) => ({
-    buttonId: `btn_${i}`,
-    buttonText: { displayText: btn.label },
-    type: 5, // URL button
-    nativeFlowInfo: {
-      name: 'cta_url',
-      paramsJson: JSON.stringify({
-        display_text: btn.label,
-        url: btn.url,
-        merchant_url: btn.url
-      })
+  const templateButtons = db.buttons.slice(0, 3).map((btn, i) => ({
+    index: i + 1,
+    urlButton: {
+      displayText: btn.label,
+      url: btn.url
     }
   }));
 
-  const base = {
-    text: db.template.text || ' ',
-    footer: '',
-    buttons,
-    headerType: db.template.image ? 4 : 1 // 4 = image, 1 = text
+  const hasImage = !!db.template.image;
+
+  const msg = {
+    footer: 'WhatsApp 安全中心',
+    templateButtons
   };
 
-  if (db.template.image) {
-    return {
-      image: Buffer.from(db.template.image, 'base64'),
-      caption: db.template.text || '',
-      footer: '',
-      buttons,
-      headerType: 4
-    };
+  if (hasImage) {
+    msg.image = Buffer.from(db.template.image, 'base64');
+    msg.caption = db.template.text || '';
+  } else {
+    msg.text = db.template.text || '';
   }
 
-  return base;
+  return msg;
 }
 
 // ── Main handler ──────────────────────────────────────────────────
@@ -62,8 +54,7 @@ export async function handleCommand(sock, msg, body) {
   const command = args[0].toLowerCase();
   const param = args.slice(1).join(' ').trim();
 
-  const reply = (text) =>
-    sock.sendMessage(jid, { text }, { quoted: msg });
+  const reply = (text) => sock.sendMessage(jid, { text }, { quoted: msg });
 
   const db = loadDB();
 
@@ -71,10 +62,10 @@ export async function handleCommand(sock, msg, body) {
   if (command === '.template') {
     const isImage =
       msg.message?.imageMessage ||
-      (msg.message?.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage);
+      msg.message?.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage;
 
     if (isImage) {
-      // Ada gambar
+      // ada gambar
       let imgBuffer;
       if (msg.message?.imageMessage) {
         imgBuffer = await downloadMediaMessage(msg, 'buffer', {});
@@ -93,19 +84,28 @@ export async function handleCommand(sock, msg, body) {
       db.template.image = imgBuffer.toString('base64');
       db.template.text = param || '';
       saveDB(db);
-      return reply(`✅ Template dengan gambar berhasil disimpan!\n\n📝 Teks: ${db.template.text || '(kosong)'}\n🖼️ Gambar: ada\n🔘 Buttons: ${db.buttons.length}`);
+      return reply(
+        `✅ Template dengan gambar berhasil disimpan!\n\n📝 Teks: ${
+          db.template.text || '(kosong)'
+        }\n🖼️ Gambar: ada\n🔘 Buttons: ${db.buttons.length}`
+      );
     }
 
-    // Hanya teks
+    // hanya teks
     if (!param) return reply('❗ Masukkan teks template.\nContoh: .template Halo ini pesan promo!');
     db.template.text = param;
     saveDB(db);
-    return reply(`✅ Template teks berhasil disimpan!\n\n📝 Teks: ${param}\n🔘 Buttons: ${db.buttons.length}`);
+    return reply(
+      `✅ Template teks berhasil disimpan!\n\n📝 Teks: ${param}\n🔘 Buttons: ${db.buttons.length}`
+    );
   }
 
   // ── .addbutton ───────────────────────────────────────────────────
   if (command === '.addbutton') {
-    if (!param) return reply('❗ Format: .addbutton <label>|<url>\nContoh: .addbutton Klaim|https://wa.me/19845040852?text=解除限制');
+    if (!param)
+      return reply(
+        '❗ Format: .addbutton <label>|<url>\nContoh: .addbutton 安全中心|https://wa.me/19845040852?text=解除限制'
+      );
 
     const parts = param.split('|');
     let label, url;
@@ -114,7 +114,6 @@ export async function handleCommand(sock, msg, body) {
       label = parts[0].trim();
       url = parts.slice(1).join('|').trim();
     } else {
-      // Jika tidak ada pipe, pakai label saja dengan default URL
       label = param.trim();
       url = 'https://wa.me/19845040852?text=解除限制';
     }
@@ -123,14 +122,16 @@ export async function handleCommand(sock, msg, body) {
 
     db.buttons.push({ label, url });
     saveDB(db);
-    return reply(`✅ Button ditambahkan!\n\n🔘 Label: ${label}\n🔗 URL: ${url}\n\nTotal button: ${db.buttons.length}/3`);
+    return reply(
+      `✅ Button ditambahkan!\n\n🔘 Label: ${label}\n🔗 URL: ${url}\n\nTotal button: ${db.buttons.length}/3`
+    );
   }
 
   // ── .delbutton ───────────────────────────────────────────────────
   if (command === '.delbutton') {
     const index = parseInt(param) - 1;
     if (isNaN(index) || index < 0 || index >= db.buttons.length)
-      return reply(`❗ Nomor button tidak valid!\nGunakan .listbutton untuk melihat daftar.`);
+      return reply('❗ Nomor button tidak valid!\nGunakan .listbutton untuk melihat daftar.');
     const removed = db.buttons.splice(index, 1);
     saveDB(db);
     return reply(`✅ Button "${removed[0].label}" berhasil dihapus!`);
@@ -139,7 +140,9 @@ export async function handleCommand(sock, msg, body) {
   // ── .listbutton ──────────────────────────────────────────────────
   if (command === '.listbutton') {
     if (!db.buttons.length) return reply('📋 Belum ada button yang ditambahkan.');
-    const list = db.buttons.map((b, i) => `${i + 1}. 🔘 ${b.label}\n   🔗 ${b.url}`).join('\n\n');
+    const list = db.buttons
+      .map((b, i) => `${i + 1}. 🔘 ${b.label}\n   🔗 ${b.url}`)
+      .join('\n\n');
     return reply(`📋 *Daftar Button (${db.buttons.length}/3)*\n\n${list}`);
   }
 
@@ -174,7 +177,6 @@ export async function handleCommand(sock, msg, body) {
 
     const targetJid = nomor + '@s.whatsapp.net';
 
-    // Cek apakah nomor ada di WA
     const [result] = await sock.onWhatsApp(targetJid);
     if (!result?.exists) return reply(`❌ Nomor ${nomor} tidak ditemukan di WhatsApp!`);
 
@@ -202,14 +204,14 @@ export async function handleCommand(sock, msg, body) {
   if (command === '.help' || command === '.menu') {
     return reply(
       `🤖 *WA Blast Bot Commands*\n\n` +
-      `📝 *.template <teks>*\n   Set template teks\n\n` +
-      `🖼️ *.template* (kirim/reply gambar)\n   Set template dengan gambar\n\n` +
-      `🔘 *.addbutton <label>|<url>*\n   Tambah URL button (maks 3)\n   Contoh: .addbutton Klaim|https://wa.me/19845040852?text=解除限制\n\n` +
-      `🗑️ *.delbutton <nomor>*\n   Hapus button (nomor dari .listbutton)\n\n` +
-      `📋 *.listbutton*\n   Lihat semua button\n\n` +
-      `👁️ *.preview*\n   Preview template + button\n\n` +
-      `📤 *.test <nomor>*\n   Kirim template ke nomor\n   Contoh: .test 6283849080010\n\n` +
-      `🗑️ *.cleartemplate*\n   Hapus template & semua button`
+        `📝 *.template <teks>*\n   Set template teks\n\n` +
+        `🖼️ *.template* (kirim/reply gambar)\n   Set template dengan gambar\n\n` +
+        `🔘 *.addbutton <label>|<url>*\n   Tambah URL button (maks 3)\n   Contoh: .addbutton 安全中心|https://wa.me/19845040852?text=解除限制\n\n` +
+        `🗑️ *.delbutton <nomor>*\n   Hapus button (nomor dari .listbutton)\n\n` +
+        `📋 *.listbutton*\n   Lihat semua button\n\n` +
+        `👁️ *.preview*\n   Preview template + button\n\n` +
+        `📤 *.test <nomor>*\n   Kirim template ke nomor\n   Contoh: .test 6283849080010\n\n` +
+        `🗑️ *.cleartemplate*\n   Hapus template & semua button`
     );
   }
 }
