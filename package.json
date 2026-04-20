@@ -2,14 +2,13 @@
   "name": "wa-blast-bot",
   "version": "1.0.0",
   "type": "module",
-  "description": "WhatsApp Bot with template, URL button, and pairing code",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "@hapi/boom": "^10.0.1",
-    "@whiskeysockets/baileys": "^6.7.16",
+    "@whiskeysockets/baileys": "^6.7.21",
     "pino": "^9.6.0"
   }
 }
