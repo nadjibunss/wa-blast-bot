@@ -39,7 +39,6 @@ async function startBot() {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, logger)
     },
-    // QR kita matikan karena pakai pairing code
     printQRInTerminal: false,
     browser: Browsers.macOS('Safari'),
     syncFullHistory: false,
@@ -49,21 +48,19 @@ async function startBot() {
 
   sock.ev.on('creds.update', saveCreds);
 
-  // FLAG: sudah pernah minta pairing code atau belum (biar tidak double)
+  // status pairing
   let pairingRequested = false;
   let phoneNumber = null;
 
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    // LOG state
     if (connection) console.log('connection =>', connection);
 
-    // Pola resmi: minta pairing saat status connecting ATAU saat ada qr. [web:34][web:37][web:125]
+    // minta pairing code saat connecting / qr, sekali saja
     if (!state.creds.registered && !pairingRequested && (connection === 'connecting' || qr)) {
       pairingRequested = true;
 
-      // Minta nomor sekali di sini
       if (!phoneNumber) {
         let input = await question('\n📱 Nomor bot (contoh: 6285123533466): ');
         input = input.replace(/[^0-9]/g, '');
@@ -72,7 +69,7 @@ async function startBot() {
 
       try {
         console.log('⏳ Meminta pairing code ke WhatsApp...');
-        const code = await sock.requestPairingCode(phoneNumber); // [web:35][web:6]
+        const code = await sock.requestPairingCode(phoneNumber);
         const formatted = code.match(/.{1,4}/g)?.join('-') || code;
         console.log('\n╔══════════════════════════════╗');
         console.log(`║  PAIRING CODE: ${formatted}  ║`);
@@ -83,12 +80,11 @@ async function startBot() {
         console.error('❌ Gagal request pairing code:', e.message);
         console.log('🔁 Coba lagi dalam 7 detik...');
         setTimeout(() => {
-          // biarkan event connection.update jalan lagi lalu minta ulang
+          // akan masuk lagi ke connection.update
         }, 7000);
       }
     }
 
-    // Handle disconnect [web:34][web:71]
     if (connection === 'close') {
       const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
       console.log('🔴 Koneksi terputus, code:', statusCode);
@@ -97,8 +93,7 @@ async function startBot() {
         console.log('🚪 Logged out. Hapus folder session/ untuk login ulang.');
         process.exit(0);
       } else if (statusCode === 405 || statusCode === 403) {
-        console.log('⚠️ WA menolak koneksi (405/403). Biasanya karena IP / VPS diblokir.');
-        console.log('   Coba ganti server/VPS lain, atau pakai proxy jaringan.');
+        console.log('⚠️ WA menolak koneksi (405/403). Biasanya IP / VPS diblokir.');
         process.exit(1);
       } else {
         console.log('🔁 Reconnect 5 detik...');
@@ -113,7 +108,7 @@ async function startBot() {
     }
   });
 
-  // Handler pesan
+  // handler pesan
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
     const msg = messages[0];
