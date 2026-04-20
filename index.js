@@ -2,8 +2,7 @@ import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
   makeCacheableSignalKeyStore,
-  fetchLatestBaileysVersion,
-  PHONENUMBER_MCC
+  fetchLatestBaileysVersion
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import { createInterface } from 'readline';
@@ -39,8 +38,7 @@ async function startBot() {
     browser: ['Ubuntu', 'Chrome', '120.0.6099.71'],
     markOnlineOnConnect: true,
     syncFullHistory: false,
-    generateHighQualityLinkPreview: false,
-    shouldIgnoreJid: jid => jid.includes('@broadcast')
+    generateHighQualityLinkPreview: false
   });
 
   // Pairing code jika belum login
@@ -48,62 +46,61 @@ async function startBot() {
     let phoneNumber = await question('\n📱 Masukkan nomor HP bot (contoh: 6285123533466): ');
     phoneNumber = phoneNumber.replace(/[^0-9]/g, '');
 
-    if (!Object.keys(PHONENUMBER_MCC).some(v => phoneNumber.startsWith(v))) {
-      console.log('⚠️  Kode negara tidak dikenali, tapi tetap mencoba...');
-    }
+    console.log('⏳ Menunggu koneksi ke server WA...');
 
-    console.log('⏳ Menunggu socket siap...');
-    // Tunggu sampai socket ready sebelum request pairing
-    await new Promise(resolve => {
-      const check = () => {
-        if (sock.ws.readyState === 1) return resolve();
-        setTimeout(check, 500);
-      };
-      check();
+    // Tunggu sampai WebSocket benar-benar open
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Timeout koneksi ke WA')), 30000);
+      const interval = setInterval(() => {
+        if (sock.ws?.readyState === 1) {
+          clearInterval(interval);
+          clearTimeout(timeout);
+          resolve();
+        }
+      }, 500);
     });
+
+    // Delay kecil agar handshake selesai
+    await new Promise(r => setTimeout(r, 2000));
 
     try {
       const code = await sock.requestPairingCode(phoneNumber);
       const formatted = code?.match(/.{1,4}/g)?.join('-') || code;
-      console.log(`\n╔══════════════════════════╗`);
-      console.log(`║  PAIRING CODE: ${formatted.padEnd(11)}║`);
-      console.log(`╚══════════════════════════╝`);
-      console.log('👉 WA → Perangkat Tertaut → Tautkan dengan nomor telepon\n');
+      console.log(`\n╔═══════════════════════════════╗`);
+      console.log(`║   PAIRING CODE : ${formatted}   ║`);
+      console.log(`╚═══════════════════════════════╝`);
+      console.log('👉 Buka WA → Perangkat Tertaut → Tautkan dengan nomor telepon\n');
     } catch (e) {
-      console.error('❌ Gagal request pairing code:', e.message);
-      process.exit(1);
+      console.error('\n❌ Gagal minta pairing code:', e.message);
+      console.log('🔁 Coba lagi dalam 5 detik...');
+      setTimeout(() => { sock.ws.close(); startBot(); }, 5000);
+      return;
     }
   }
 
   sock.ev.on('creds.update', saveCreds);
 
-  sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
+  sock.ev.on('connection.update', ({ connection, lastDisconnect }) => {
     if (connection === 'close') {
-      const err = lastDisconnect?.error;
-      const statusCode = new Boom(err)?.output?.statusCode;
-
-      console.log('🔴 Koneksi terputus | Status:', statusCode, '|', err?.message || '');
+      const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
+      console.log('🔴 Koneksi terputus | Code:', statusCode);
 
       if (statusCode === DisconnectReason.loggedOut) {
         console.log('🚪 Bot di-logout. Hapus folder session/ lalu jalankan ulang.');
         process.exit(0);
-      } else if (statusCode === DisconnectReason.restartRequired) {
-        console.log('🔄 Restart required, reconnecting...');
-        startBot();
       } else if (statusCode === 405) {
-        console.log('⚠️  WA menolak koneksi (405). Hapus folder session/ lalu coba lagi.');
+        console.log('⚠️  WA menolak (405). Hapus folder session/ dan coba lagi.');
         process.exit(1);
       } else {
-        console.log('🔁 Mencoba reconnect dalam 5 detik...');
+        console.log('🔁 Reconnect dalam 5 detik...');
         setTimeout(startBot, 5000);
       }
     } else if (connection === 'connecting') {
-      console.log('🔵 Sedang menghubungkan ke WhatsApp...');
+      console.log('🔵 Menghubungkan ke WhatsApp...');
     } else if (connection === 'open') {
-      console.log('🟢 Bot berhasil terhubung ke WhatsApp!');
-      console.log(`👤 Nomor: ${sock.user?.id}`);
-      console.log('📋 Prefix: . (titik)');
-      console.log('📋 Ketik .help di WA untuk melihat commands\n');
+      console.log('🟢 Bot berhasil terhubung!');
+      console.log(`👤 Akun: ${sock.user?.id?.split(':')[0]}`);
+      console.log('📌 Ketik .help di WA untuk melihat semua perintah\n');
     }
   });
 
@@ -113,11 +110,8 @@ async function startBot() {
     if (!msg?.message) return;
 
     const jid = msg.key.remoteJid;
-    if (!jid) return;
-    if (jid.endsWith('@g.us')) return; // skip group
-    if (jid === 'status@broadcast') return;
+    if (!jid || jid.endsWith('@g.us') || jid === 'status@broadcast') return;
 
-    // Ambil body pesan
     const body =
       msg.message?.conversation ||
       msg.message?.extendedTextMessage?.text ||
@@ -130,13 +124,13 @@ async function startBot() {
     try {
       await handleCommand(sock, msg, body);
     } catch (e) {
-      console.error('❌ Error handler:', e.message);
+      console.error('❌ Handler error:', e.message);
       await sock.sendMessage(jid, { text: '❌ Error: ' + e.message }, { quoted: msg }).catch(() => {});
     }
   });
 }
 
-startBot().catch(e => {
-  console.error('Fatal error:', e);
+startBot().catch(err => {
+  console.error('Fatal:', err.message);
   process.exit(1);
 });
