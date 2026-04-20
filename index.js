@@ -1,44 +1,36 @@
+// index.js
 import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
   makeCacheableSignalKeyStore,
-  fetchLatestBaileysVersion,
-  Browsers
+  Browsers,
+  fetchLatestBaileysVersion
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import { createInterface } from 'readline';
-import { handleCommand } from './handler.js';
 import { Boom } from '@hapi/boom';
+import { handleCommand } from './handler.js';
 
 const logger = pino({ level: 'silent' });
 
 function question(prompt) {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise(resolve =>
-    rl.question(prompt, ans => {
+  return new Promise((resolve) =>
+    rl.question(prompt, (ans) => {
       rl.close();
       resolve(ans.trim());
     })
   );
 }
 
-function waitForOpen(sock, timeoutMs = 30000) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Timeout: WS tidak terbuka dalam 30 detik')), timeoutMs);
-    const iv = setInterval(() => {
-      if (sock.ws?.readyState === 1) {
-        clearInterval(iv);
-        clearTimeout(timer);
-        resolve();
-      }
-    }, 300);
-  });
-}
-
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState('./session');
   const { version } = await fetchLatestBaileysVersion();
-  console.log(`\n📦 Using WA version: ${version.join('.')}`);
+
+  console.log('\n==============================');
+  console.log(' WA Blast Bot - Pairing Code');
+  console.log('==============================');
+  console.log('Using WA version:', version.join('.'));
 
   const sock = makeWASocket({
     version,
@@ -47,70 +39,81 @@ async function startBot() {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, logger)
     },
+    // QR kita matikan karena pakai pairing code
     printQRInTerminal: false,
     browser: Browsers.macOS('Safari'),
-    markOnlineOnConnect: false,
     syncFullHistory: false,
-    fireInitQueries: true,
     generateHighQualityLinkPreview: false,
-    shouldSyncHistoryMessage: () => false
+    markOnlineOnConnect: false
   });
-
-  if (!state.creds.registered) {
-    let phone = await question('\n📱 Nomor bot (contoh: 6285123533466): ');
-    phone = phone.replace(/[^0-9]/g, '');
-
-    console.log('⏳ Menunggu WS terhubung ke server WA...');
-    try {
-      await waitForOpen(sock);
-    } catch (e) {
-      console.error('❌', e.message);
-      sock.end();
-      return setTimeout(startBot, 3000);
-    }
-
-    await new Promise(r => setTimeout(r, 1500));
-
-    try {
-      const code = await sock.requestPairingCode(phone);
-      const fmt = code?.match(/.{1,4}/g)?.join('-') || code;
-      console.log('\n╬══════════════════════════════╬');
-      console.log(`  🔑 PAIRING CODE : ${fmt}`);
-      console.log('╬══════════════════════════════╬');
-      console.log('👉 WA → Perangkat Tertaut → Tautkan dg nomor telepon\n');
-    } catch (e) {
-      console.error('❌ Gagal pairing code:', e.message);
-      sock.end();
-      return setTimeout(startBot, 5000);
-    }
-  }
 
   sock.ev.on('creds.update', saveCreds);
 
-  sock.ev.on('connection.update', ({ connection, lastDisconnect }) => {
-    if (connection === 'close') {
-      const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
-      console.log('🔴 Disconnect | Code:', code, lastDisconnect?.error?.message || '');
+  // FLAG: sudah pernah minta pairing code atau belum (biar tidak double)
+  let pairingRequested = false;
+  let phoneNumber = null;
 
-      if (code === DisconnectReason.loggedOut) {
-        console.log('🚪 Logged out. Hapus folder session/ lalu restart.');
-        return process.exit(0);
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    // LOG state
+    if (connection) console.log('connection =>', connection);
+
+    // Pola resmi: minta pairing saat status connecting ATAU saat ada qr. [web:34][web:37][web:125]
+    if (!state.creds.registered && !pairingRequested && (connection === 'connecting' || qr)) {
+      pairingRequested = true;
+
+      // Minta nomor sekali di sini
+      if (!phoneNumber) {
+        let input = await question('\n📱 Nomor bot (contoh: 6285123533466): ');
+        input = input.replace(/[^0-9]/g, '');
+        phoneNumber = input;
       }
-      if (code === 405 || code === 403) {
-        console.log(`⚠️  WA menolak koneksi (${code}). Hapus session/ lalu coba lagi.`);
-        return process.exit(1);
+
+      try {
+        console.log('⏳ Meminta pairing code ke WhatsApp...');
+        const code = await sock.requestPairingCode(phoneNumber); // [web:35][web:6]
+        const formatted = code.match(/.{1,4}/g)?.join('-') || code;
+        console.log('\n╔══════════════════════════════╗');
+        console.log(`║  PAIRING CODE: ${formatted}  ║`);
+        console.log('╚══════════════════════════════╝');
+        console.log('👉 WA > Perangkat tertaut > Tautkan dengan nomor telepon\n');
+      } catch (e) {
+        pairingRequested = false;
+        console.error('❌ Gagal request pairing code:', e.message);
+        console.log('🔁 Coba lagi dalam 7 detik...');
+        setTimeout(() => {
+          // biarkan event connection.update jalan lagi lalu minta ulang
+        }, 7000);
       }
-      console.log('🔁 Reconnect 5 detik...');
-      setTimeout(startBot, 5000);
-    } else if (connection === 'connecting') {
-      console.log('🔵 Menghubungkan...');
-    } else if (connection === 'open') {
-      console.log('🟢 Terhubung ke WhatsApp!');
+    }
+
+    // Handle disconnect [web:34][web:71]
+    if (connection === 'close') {
+      const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
+      console.log('🔴 Koneksi terputus, code:', statusCode);
+
+      if (statusCode === DisconnectReason.loggedOut) {
+        console.log('🚪 Logged out. Hapus folder session/ untuk login ulang.');
+        process.exit(0);
+      } else if (statusCode === 405 || statusCode === 403) {
+        console.log('⚠️ WA menolak koneksi (405/403). Biasanya karena IP / VPS diblokir.');
+        console.log('   Coba ganti server/VPS lain, atau pakai proxy jaringan.');
+        process.exit(1);
+      } else {
+        console.log('🔁 Reconnect 5 detik...');
+        setTimeout(startBot, 5000);
+      }
+    }
+
+    if (connection === 'open') {
+      console.log('\n🟢 Bot terhubung ke WhatsApp!');
       console.log(`👤 Akun: ${sock.user?.id?.split(':')[0]}`);
-      console.log('📌 Ketik .help di WA untuk melihat commands\n');
+      console.log('📌 Ketik .help di chat bot untuk lihat menu.\n');
     }
   });
 
+  // Handler pesan
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
     const msg = messages[0];
@@ -132,12 +135,14 @@ async function startBot() {
       await handleCommand(sock, msg, body);
     } catch (e) {
       console.error('❌ Handler error:', e.message);
-      sock.sendMessage(jid, { text: '❌ Error: ' + e.message }, { quoted: msg }).catch(() => {});
+      await sock
+        .sendMessage(jid, { text: '❌ Terjadi error: ' + e.message }, { quoted: msg })
+        .catch(() => {});
     }
   });
 }
 
-startBot().catch(e => {
-  console.error('Fatal:', e.message);
+startBot().catch((err) => {
+  console.error('Fatal error:', err);
   process.exit(1);
 });
