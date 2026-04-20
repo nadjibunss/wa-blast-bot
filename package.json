@@ -2,6 +2,7 @@
   "name": "wa-blast-bot",
   "version": "1.0.0",
   "type": "module",
+  "description": "WhatsApp Bot with template, URL button, and pairing code",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
